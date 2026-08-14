@@ -2,8 +2,8 @@
 
 This project is self-contained. Every resource below belongs to **this build
 only** — nothing is shared with the Use Case Studio that scoped it or with the
-sibling builds. The repo can be moved anywhere on disk, or handed to someone
-else, without breaking a reference.
+sibling use-case builds. The repo can be moved anywhere on disk, or handed to
+someone else, without breaking a reference.
 
 Sensitivity is **internal**; oversight is **required**. See "Project boundaries"
 in [CLAUDE.md](CLAUDE.md) for why separation is load-bearing rather than tidy.
@@ -12,61 +12,95 @@ in [CLAUDE.md](CLAUDE.md) for why separation is load-bearing rather than tidy.
 
 ## 1. Source control — done
 
-`shanelabountyai/grant-proposal-assembly`, private. Its own history, issues and
-access list.
+`shanelabountyai/use-case-grant-proposal-assembly`, private. Its own history,
+issues and access list. The `use-case-` prefix marks it as generated from the
+AI Use-Case Studio.
+
+## 2. Install
 
 ```bash
-git remote -v          # origin → shanelabountyai/grant-proposal-assembly
+nvm use            # .nvmrc → 22
+npm install        # postinstall runs prisma generate
 ```
 
-## 2. Database
+Stack matches the rental and storage platforms: npm workspaces (`apps/web`,
+`packages/core`, `packages/db`), Next 16 / React 19, Prisma + Postgres,
+next-auth v5, Tailwind v4 with shadcn/radix, vitest for unit, Playwright for
+e2e.
 
-**Do this per project.** Create a Neon project named `grant-proposal-assembly`
-for dev and production. Do not reuse the Studio's Neon project or a sibling
-build's — the three builds carry different data sensitivities (internal here,
-regulated and PII next door), and one shared database inherits the strictest
-retention rule across all of them.
+## 3. Database — the test suite never points at a remote database
+
+**Dev/prod:** this project's own Neon project, named
+`use-case-grant-proposal-assembly`. Not the Studio's, not a sibling build's —
+the three builds carry different data sensitivities, and one shared database
+inherits the strictest retention rule across all of them.
+
+**Tests: local Postgres. Always.**
 
 ```bash
-# Local Postgres for tests — never a cloud database in the test path.
 brew install postgresql@17 && brew services start postgresql@17
 createdb grant_proposal_test
 
-# .env.test overrides ONLY the database; everything else comes from .env.local
+# .env.test overrides ONLY the database; every other secret falls through
+# to .env.local. Both are gitignored.
 printf 'DATABASE_URL=postgresql://%s@localhost:5432/grant_proposal_test\nDIRECT_URL=postgresql://%s@localhost:5432/grant_proposal_test\n' \
   "$(whoami)" "$(whoami)" > .env.test
+
+npm run db:migrate:test && npm run db:seed:test
+npm test
 ```
 
-Point the test scripts at both files, **first file wins**:
+The `dotenv -e .env.test -e .env.local` scripts are already wired in
+`package.json` — `test`, `test:e2e`, `dev:test`, plus `db:migrate:all`,
+`db:status` and `db:reset:test`. You don't need to add them.
 
-```jsonc
-"test":     "dotenv -e .env.test -e .env.local -- vitest run",
-"test:e2e": "dotenv -e .env.test -e .env.local -- playwright test",
-"dev:test": "dotenv -e .env.test -e .env.local -- npm run dev"
-```
+**Why, measured on the rental platform — same suite, same machine, only the
+database moved:**
 
-Why local: a remote test database turns a 0.75s integration test into ~113s,
-and — the bigger reason — makes infrastructure strain look exactly like flaky
-tests. Locally, a failing test means the code is wrong.
+| | Remote (Neon, us-east-2) | Local Postgres |
+|---|---|---|
+| one integration test file | 113s | **0.75s** |
+| full unit suite (1,321 tests) | ~120s | **39.8s** |
+| full e2e sweep | ~20 min | **8.8 min** |
 
-Two traps worth knowing before you hit them:
+Integration tests are latency-bound, not compute-bound. Localhost turns a ~50ms
+round trip into ~0.5ms, and no paid tier fixes that — distance is distance.
 
-- **Playwright's `webServer` needs the same env.** If it still runs `npm run dev`,
-  the app under test talks to the cloud while the specs talk to localhost.
-- **Migrations no longer reach the cloud dev branch as a side effect** of running
-  tests. Keep a `db:migrate:all` that hits both, or dev drifts silently.
+**The bigger reason is diagnostic honesty.** A shared remote test database made
+infrastructure strain look exactly like flaky tests: 48,000 rows of accumulated
+test debris, one mid-sweep outage that produced 239 failures all with the same
+signature, and a 2.4-second test starved past a 60-second timeout. Hours went
+into chasing "flaky tests" that were never code. Locally, a failing test means
+the code is wrong.
 
-## 3. Environment
+**Three traps, each of which has cost a debugging pass:**
+
+- **`dotenv -e A -e B`: the FIRST file wins.** Verify it in your version rather
+  than assuming — that ordering is the whole reason `.env.test` can override
+  just the database and inherit every other secret from `.env.local`.
+- **Playwright's `webServer` must run `dev:test`, not `dev`.** Already set in
+  `playwright.config.ts`. With plain `dev`, the app under test talks to the
+  cloud while the specs talk to localhost — a split brain where a spec seeds a
+  record the app cannot see.
+- **Migrations no longer reach the cloud dev branch as a side effect** of
+  running tests, because tests no longer run there. `db:migrate:all` and
+  `db:status` exist so that cannot go unnoticed. Production stays a deliberate,
+  separate command.
+
+**Schema syncs; data deliberately does not.** Migrations in git are the only
+thing shared between local, dev and production. Fixtures must never reach
+production, and production data must never reach a laptop.
+
+## 4. Environment
 
 ```bash
 cp .env.example .env.local     # fill in; never commit
 ```
 
-`.gitignore` already covers `.env` and `.env*.local`. Before this repo's first
-push of any new file, confirm nothing secret is tracked:
+Before any new file's first push, confirm nothing secret is tracked:
 
 ```bash
-git ls-files | grep -iE "\.env|secret|credential|\.pem$|\.key$"   # expect no output
+git ls-files | grep -iE "\.env$|\.env\.local|secret|credential|\.pem$|\.key$"   # expect no output
 ```
 
 **`ANTHROPIC_API_KEY` stays empty until Phase 0 clears it.** P0-AC-10 requires a
@@ -74,27 +108,27 @@ recorded external-provider data-handling decision, and P0-AC-11 asserts that no
 corpus content was processed before that date. A key populated early is exactly
 how that gets violated by accident.
 
-## 4. Deploy and CI
+## 5. Deploy and CI
 
 Its own Vercel project and its own workflow — not a directory inside another
-project's deployment. Provision when there is an app to deploy; there isn't yet.
+project's deployment. `apps/web` has a `vercel-build` that generates the Prisma
+client before `next build`, because the generated client is build output and a
+clean checkout has none.
 
-## 5. Model provider
+## 6. Model provider
 
 Its own key, so rotating or revoking one build's credential never touches
-another's. The plan requires the provider sit behind a thin swappable interface:
-capability requirements are long-context composition and instruction-following,
-and no vendor is named as mandatory.
+another's. The plan requires the provider sit behind a thin swappable
+interface: capability requirements are long-context composition and
+instruction-following, and no vendor is named as mandatory.
 
 ---
 
-## Not yet decided
+## Still open
 
-The application stack is an **open question**, deliberately. The plan names
-capabilities, not products — a managed vector store or an embedded index, a
-provider-swappable model interface, export into the format writers already edit
-in. Nothing in `docs/` chooses a framework, and per this project's working
-rules that makes it an open question rather than an assumption to fill in.
+`packages/db/prisma/schema.prisma` has **no models on purpose**. The entities
+this build needs are defined by its milestones (`docs/prd/`), and inventing them
+here would be the exact assumption this project's working rules forbid: if it
+isn't in `CLAUDE.md` or `docs/`, it's an open question, not a default to fill in.
 
-Decide it at Phase 2, when the thinnest scoreable draft loop needs somewhere to
-run, and record the decision here.
+The first models arrive in Phase 1 (approved corpus and figures register).
