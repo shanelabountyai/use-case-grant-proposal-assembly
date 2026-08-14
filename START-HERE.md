@@ -55,14 +55,60 @@ Rules that are not negotiable here:
 | Code | Scaffold only; no models, no features |
 | Database | Local test DB `grant_proposal_test` exists; Neon project created — `.env.local` needs its URLs |
 
-## Before the first build session
+## Neon and local Postgres
+
+This build has **its own Neon project**, named `use-case-grant-proposal-assembly`. Never point it at the Studio's or a sibling build's — the three carry different data sensitivities, and one shared database inherits the strictest retention rule across all of them. See "Project boundaries" in CLAUDE.md.
+
+### 1. Two connection strings, not one
+
+Neon console → your project → **Connect**. You need *both*, and they differ by one substring:
+
+| | Host | Goes in | Used for |
+|---|---|---|---|
+| **Pooled** | contains `-pooler` | `DATABASE_URL` | the app at runtime |
+| **Direct** | same host, no `-pooler` | `DIRECT_URL` | Prisma migrations |
+
+Serverless functions open many short-lived connections, which is what the pooler exists to absorb. Migrations need a real session and will hang or fail against the pooler — that mismatch is the single most common Neon-plus-Prisma failure, and it surfaces as a migration that never returns rather than as a clear error.
+
+Both strings need `?sslmode=require`.
+
+### 2. Write them in
 
 ```bash
-cp .env.example .env.local     # add the Neon DATABASE_URL / DIRECT_URL
-npm install                    # if node_modules is missing
-npm run db:status              # confirms both test and dev reachable
-npm test                       # green (nothing to test yet, but the wiring works)
+cp .env.example .env.local
 ```
+
+```bash
+# .env.local — real values, never committed (.env*.local is gitignored)
+DATABASE_URL="postgresql://USER:PASSWORD@ep-xxx-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require"
+DIRECT_URL="postgresql://USER:PASSWORD@ep-xxx.us-east-2.aws.neon.tech/neondb?sslmode=require"
+```
+
+`.env.example` documents names only and stays that way. Production values belong in the Vercel project's env vars, not in any file here.
+
+### 3. Local Postgres for tests — already set up
+
+```bash
+# Already done: database created and .env.test written.
+psql -lqt | grep grant_proposal_test
+```
+
+`.env.test` overrides **only** the database; every other secret falls through to `.env.local`, because `dotenv -e .env.test -e .env.local` takes the **first** file's value. Tests never touch Neon — a remote test database turns a 0.75s integration test into 113s and makes infrastructure strain look exactly like flaky tests.
+
+### 4. Confirm both halves
+
+```bash
+npm install            # if node_modules is missing
+npm run db:status      # test (local) AND dev (Neon) — both must answer
+npm test               # the guard proves tests still point at localhost
+```
+
+- `db:status:dev` fails → check `DIRECT_URL` is the **non-pooled** host and that `sslmode=require` is present.
+- `npm test` starts failing "is local, never remote" → `.env.local` has leaked into the test path. Check the dotenv ordering; first file wins.
+- Neither has migrations to report yet: `schema.prisma` has no models on purpose.
+
+**`ANTHROPIC_API_KEY` stays empty for now.** P0-AC-10 requires the external-provider data-handling decision to be recorded first, and P0-AC-11 asserts no corpus content was processed before that date. A key populated early is how that gets violated by accident.
+
 
 ## The six open questions that block real work
 
