@@ -61,6 +61,21 @@ Fix these before or during build:
 - If something isn't in this file or `docs/`, it's an open question, not an assumption to fill in.
 - Oversight is **required** and sensitivity is **internal** — check any design change against both before proposing it.
 
+## Project boundaries
+
+**This build stands alone.** It has its own repo — `shanelabountyai/grant-proposal-assembly` — and owns every piece of infrastructure it needs. Nothing is shared with the Use Case Studio that scoped it, or with the sibling builds (`insurance-fnol-intake`, `support-ticket-deflection`).
+
+Provision per-project, never shared:
+
+- **Database** — its own Neon project for dev and production. Tests run against a **local Postgres** (`grant_proposal_test`), never a cloud database: a remote test DB turns a 0.75s integration test into 113s and makes infrastructure strain look exactly like flaky tests.
+- **Env** — its own `.env` / `.env.local`, not inherited from a parent folder. `.env.example` documents variable **names** only.
+- **Deploy and CI** — its own Vercel project and its own workflow.
+- **Model provider keys** — its own, so revoking or rotating one build's key never touches another's. Note this build cannot process corpus content through an external provider at all until the Phase 0 data-handling decision is recorded (P0-AC-10/11).
+
+**Why this is not ceremony.** The three builds carry different data sensitivities — this one is **internal**, FNOL is **regulated** (state-level retention rules), support-ticket is **pii** (customer names, order history, card-last-four). A shared database would put every pilot inside every other pilot's blast radius and inherit the strictest retention rule across all three. They also have separate owners, separate acceptance bars, and separate rollback triggers; a pause here must not pause anything else.
+
+Schema travels through migrations in this repo. Data does not: fixtures never reach production, and production data never reaches a laptop.
+
 ## Layout
 
 - `docs/prd-pack.md` — session starter + one PRD prompt per milestone. Start here.
